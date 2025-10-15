@@ -13,6 +13,10 @@ import nest_asyncio
 from dotenv import load_dotenv
 from pathlib import Path
 import numpy as np
+import tempfile
+import time
+import uuid
+import math
 
 
 from app.models import AudioResponse
@@ -36,6 +40,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Initialize Gemini client
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+print(f"GEMINI_API_KEY: {GEMINI_API_KEY}")
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY environment variable is required")
 
@@ -44,10 +49,21 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 # Gemini model configuration
 MODEL_NAME = "gemini-2.5-flash-native-audio-preview-09-2025"
 
-config = {
-    "response_modalities": ["AUDIO"],
-    "system_instruction": "You are a helpful assistant and answer in a friendly tone.",
-}
+config =  types.LiveConnectConfig(
+    response_modalities=[
+        "AUDIO",
+    ],
+    media_resolution="MEDIA_RESOLUTION_MEDIUM",
+    speech_config=types.SpeechConfig(
+        voice_config=types.VoiceConfig(
+            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Puck")
+        )
+    ),
+    context_window_compression=types.ContextWindowCompressionConfig(
+        trigger_tokens=25600,
+        sliding_window=types.SlidingWindow(target_tokens=12800),
+    ),
+)
 
 def cleanup_file(file_path: str):
     """Clean up temporary files"""
@@ -61,6 +77,7 @@ def cleanup_file(file_path: str):
 async def root():
     return {"message": "Gemini Audio Processing API", "status": "running"}
 
+
 @app.post("/process-audio", response_model=AudioResponse)
 async def process_audio(
     background_tasks: BackgroundTasks,
@@ -71,34 +88,44 @@ async def process_audio(
     """
     Process an audio file using Gemini AI and return the processed audio
     """
+    import tempfile
+    
+    temp_file_path = None
     try:
+        print(f"Processing audio: {audio_file.filename} -> {output_sample_rate} Hz")
+        
         # Validate file type
-        if not audio_file.content_type.startswith('audio/'):
-            raise HTTPException(status_code=400, detail="File must be an audio file")
+        allowed_content_types = ['audio/wav', 'audio/x-wav', 'audio/3gpp', 'audio/mpeg', 'audio/mp4', 'audio/aac']
+        if audio_file.content_type not in allowed_content_types:
+            print(f"Warning: Unexpected content type: {audio_file.content_type}")
 
         # Read and validate the uploaded file
         file_contents = await audio_file.read()
         if len(file_contents) == 0:
             raise HTTPException(status_code=400, detail="Uploaded file is empty")
-
+        
         # Generate output filename
         input_filename = audio_file.filename or "uploaded_audio"
-        output_filename = f"processed_{os.path.splitext(input_filename)[0]}.wav"
+        output_filename = f"processed_{os.path.splitext(input_filename)[0]}_{output_sample_rate}_{math.floor(time.time())}_{uuid.uuid4()}.wav"
         output_path = Path(f"static/{output_filename}")
         
         # Ensure the directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        print(f"Output path: {output_path}")
+        print(f"Output file path: {output_path}")
+
+        # Save uploaded file to temporary location
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
+            temp_file.write(file_contents)
+            temp_file_path = temp_file.name
+        
+        print(f"Temporary file created at: {temp_file_path}")
 
         # Process audio with Gemini
         async with client.aio.live.connect(model=MODEL_NAME, config=config) as session:
-            # Convert audio to required format (16kHz mono, 16-bit PCM)
-            buffer = io.BytesIO(file_contents)
-            
             try:
-                # Load audio with librosa and convert to required format
-                y, sr = librosa.load(buffer, sr=sample_rate, mono=True)
+                # Load audio from temporary file
+                y, sr = librosa.load(temp_file_path, sr=sample_rate, mono=True)
                 
                 # Convert to bytes in required format
                 converted_buffer = io.BytesIO()
@@ -163,9 +190,6 @@ async def process_audio(
                     detail="Output audio file is empty"
                 )
 
-        # Schedule cleanup of the output file after 1 hour (uncomment if needed)
-        # background_tasks.add_task(cleanup_file, str(output_path))
-
         return AudioResponse(
             message="Audio processed successfully",
             audio_url=f"/static/{output_filename}",
@@ -181,7 +205,16 @@ async def process_audio(
             status_code=500, 
             detail=f"Error processing audio: {str(e)}"
         )
+    finally:
+        # Clean up temporary file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+                print(f"Cleaned up temporary file: {temp_file_path}")
+            except Exception as e:
+                print(f"Error cleaning up temp file: {e}")
 
+        
 @app.get("/download-audio/{filename}")
 async def download_audio(filename: str):
     """

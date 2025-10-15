@@ -6,3 +6,4 @@ librosa
 soundfile
 nest-asyncio
 python-dotenv
+resampy
