@@ -88,14 +88,26 @@ async def process_audio(
     """
     Process an audio file using Gemini AI and return the processed audio
     """
+    
+    # return AudioResponse(
+    #         message="Audio processed successfully",
+    #         audio_url=f"/static/processed_audio_record_20251028_115826_24000_1761638320_3446674e-5226-4dfc-a21c-aad67dbc3020.wav",
+    #         success=True,
+    #         file_size="126"  # Add this to your AudioResponse model if needed
+    #     )
+    
+
+
     import tempfile
+    
     
     temp_file_path = None
     try:
         print(f"Processing audio: {audio_file.filename} -> {output_sample_rate} Hz")
+        print(f"Audio size: {audio_file.size}")
         
         # Validate file type
-        allowed_content_types = ['audio/wav', 'audio/x-wav', 'audio/3gpp', 'audio/mpeg', 'audio/mp4', 'audio/aac']
+        allowed_content_types = ['audio/wav', 'audio/x-wav', 'audio/3gpp', 'audio/mpeg', 'audio/mp4', 'audio/aac', 'audio/m4a']
         if audio_file.content_type not in allowed_content_types:
             print(f"Warning: Unexpected content type: {audio_file.content_type}")
 
@@ -119,6 +131,21 @@ async def process_audio(
             temp_file.write(file_contents)
             temp_file_path = temp_file.name
         
+        original_filename = f"original_{os.path.splitext(input_filename)[0]}_{math.floor(time.time())}_{uuid.uuid4()}.mp4"
+        project_root = Path(__file__).parent.parent  # Adjust this based on your structure
+        original_path = project_root / "static" / "originals" / original_filename
+       
+        
+        # Ensure directories exist
+        original_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(original_path, 'wb') as orig_file:
+            orig_file.write(file_contents)
+        print(f"Original audio saved to: {original_path}")
+        
+            
+        
+       
+        
         print(f"Temporary file created at: {temp_file_path}")
 
         # Process audio with Gemini
@@ -126,7 +153,8 @@ async def process_audio(
             try:
                 # Load audio from temporary file
                 y, sr = librosa.load(temp_file_path, sr=sample_rate, mono=True)
-                
+                print("sr", sr)
+                print("y", y.shape)
                 # Convert to bytes in required format
                 converted_buffer = io.BytesIO()
                 sf.write(converted_buffer, y, sr, format="RAW", subtype="PCM_16")
@@ -134,6 +162,7 @@ async def process_audio(
                 audio_bytes = converted_buffer.read()
                 
             except Exception as e:
+                print(f"Error processing audio file: {str(e)}")
                 raise HTTPException(
                     status_code=400, 
                     detail=f"Error processing audio file: {str(e)}"
@@ -189,7 +218,19 @@ async def process_audio(
                     status_code=500,
                     detail="Output audio file is empty"
                 )
-
+                
+        
+        return FileResponse(
+            path=str(output_path),
+            media_type='audio/wav',
+            filename=output_filename,
+            headers={
+                "Content-Disposition": f"attachment; filename={output_filename}",
+                "X-File-Size": str(file_size),
+                "X-Audio-Duration": str(file_size / (output_sample_rate * 2))  # Approximate duration
+            }
+        )
+        
         return AudioResponse(
             message="Audio processed successfully",
             audio_url=f"/static/{output_filename}",
@@ -209,7 +250,7 @@ async def process_audio(
         # Clean up temporary file
         if temp_file_path and os.path.exists(temp_file_path):
             try:
-                os.remove(temp_file_path)
+                # os.remove(temp_file_path)
                 print(f"Cleaned up temporary file: {temp_file_path}")
             except Exception as e:
                 print(f"Error cleaning up temp file: {e}")
